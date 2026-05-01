@@ -53,11 +53,9 @@ public class Theory_Surface : MonoBehaviour
     public int numberOfIcicles = 15;
     public List<int> gizmoVertexIndices;
     public float gizmoSize = 0.3f;
-    public int[] vertexIndex;
 
-    //3단계에서 필요한 변수들
-    [Header("Icicle L-System Parameters")]
-    public int iterations = 500;
+
+    [Header("Icicle Growth Parameters")]
     public float segmentLength = 2.0f;
     public LayerMask collisionLayers;
 
@@ -135,9 +133,20 @@ public class Theory_Surface : MonoBehaviour
     public float debugNormalLength = 0.04f;
     public float debugAxisLength = 0.05f;
     public float debugDuration = 2.0f;
-    public int debugEveryNthBall = 6; 
+    public int debugEveryNthBall = 6;
 
+    //추가 리플 메타볼 생성 변수 추가
+    [Header("Ripple of metaball")]
+    public bool enableRippleMetaball = true;
+    public int rippleSegmentInterval = 2;
+    [Range(3, 12)] public int rippleSegmentCount = 6;
+    public float windwardRippleRatio = 0.08f;
+    public float leewardRippleRatio = 0.75f;
+    [Range(0f, 1f)] public float rippleEmbedRatio = 0.15f;
+    [Range(0f, 1f)] public float rippleTipFadeStart = 0.8f;
 
+    [Tooltip("이 풍속에 가까워질수록 풍상/풍하 리플 차이가 최대로 커짐")]
+    public float rippleReferenceWindSpeed = 10.0f;
     // Start is called before the first frame update
     void Start()
     {
@@ -1047,7 +1056,7 @@ public class Theory_Surface : MonoBehaviour
 
         int safety = 0;
         int maxBalls = 8000;
-
+        int bodyBallIndex = 0;
         // 시작점
         Place(trajectory[0], 0f, 0);
 
@@ -1071,7 +1080,7 @@ public class Theory_Surface : MonoBehaviour
 
             float u = (target - segAcc) / Mathf.Max(1e-6f, segLen[segIdx]);
             Vector3 p = Vector3.Lerp(trajectory[segIdx], trajectory[segIdx + 1], u);
-            int currentSegIdx = Mathf.Clamp(segIdx, 0, trajectory.Count - 2); 
+            int currentSegIdx = Mathf.Clamp(segIdx, 0, trajectory.Count - 2);
             Place(p, target, currentSegIdx);
             acc = target;
         }
@@ -1092,6 +1101,28 @@ public class Theory_Surface : MonoBehaviour
         }
 
         void Place(Vector3 localPosInHelper, float curX, int currentSegIdx) => PlaceInternal(localPosInHelper, curX, -1f, currentSegIdx);
+
+        Vector3 GetLocalPointAtDistance(float dist)
+        {
+            dist = Mathf.Clamp(dist, 0f, totalLength);
+
+            float running = 0f;
+
+            for (int i = 0; i < segLen.Count; i++)
+            {
+                float d = segLen[i];
+
+                if (running + d >= dist)
+                {
+                    float u = (dist - running) / Mathf.Max(1e-6f, d);
+                    return Vector3.Lerp(trajectory[i], trajectory[i + 1], u);
+                }
+
+                running += d;
+            }
+
+            return trajectory[trajectory.Count - 1];
+        }
 
         void PlaceInternal(Vector3 localPosInHelper, float curX, float overrideRadius, int currentSegIdx)
         {
@@ -1122,7 +1153,7 @@ public class Theory_Surface : MonoBehaviour
                 ? windCross.normalized
                 : Vector3.zero;
 
-          
+
             float baseRadius = (overrideRadius > 0f)
                 ? overrideRadius
                 : IcicleProfile(curX, totalLength, windSpeed, crossWindAmount);
@@ -1242,8 +1273,244 @@ public class Theory_Surface : MonoBehaviour
             SphereCollider sc = g.AddComponent<SphereCollider>();
             sc.isTrigger = true;
             sc.radius = finalRadius;
-
             generatedIcicleSegments.Add(g);
+
+            // 추가 Ripple metaball 배치
+            bool canAddRipple =
+                enableRippleMetaball &&
+                overrideRadius < 0f &&
+                windSpeed > 0.05f &&
+                crossWindAmount > 1e-6f &&
+                rippleSegmentCount > 0 &&
+                rippleSegmentInterval > 0 &&
+                bodyBallIndex % rippleSegmentInterval == 0 &&
+                lengthFactor < 0.95f;
+
+            if (canAddRipple)
+            {
+                // 현재 중심 메타볼과 다음 위치 사이에 리플 띠를 생성하기 위한 다음 위치 계산
+                float bandStep = Mathf.Max(minSpacing, finalRadius * 0.75f);
+                float nextX = Mathf.Min(curX + bandStep, totalLength);
+
+                if (nextX > curX + 1e-5f)
+                {
+                    Vector3 nextLocal = GetLocalPointAtDistance(nextX);
+                    Vector3 nextPointWorld = trajectoryHelper.transform.TransformPoint(nextLocal);
+
+                    // 현재 중심 메타볼에 적용된 비대칭 오프셋과 비슷하게 맞춰줌
+                    nextPointWorld += asymmetryOffset;
+
+                    float nextLengthFactor = Mathf.Clamp01(nextX / Mathf.Max(0.0001f, totalLength));
+
+                    float nextBaseRadius = IcicleProfile(nextX, totalLength, windSpeed, crossWindAmount);
+
+                    float nextRootThickness = Mathf.Lerp(waterValue, 0f, nextLengthFactor);
+                    nextBaseRadius *= (1.0f + nextRootThickness);
+
+                    float nextBodyBiasLerp = nextLengthFactor * windStrength;
+                    float nextCurrentBodyAw = Mathf.Lerp(rootAw, windDrivenAw, nextBodyBiasLerp);
+
+                    float nextVolumeIncrease = 1.0f + (Mathf.Abs(nextCurrentBodyAw) * windBias);
+                    float nextFinalRadius = nextBaseRadius * nextVolumeIncrease;
+
+                    AddRippleMetaballsBetweenSegments(
+                        metaballIcicle,
+                        pointInWorld,
+                        nextPointWorld,
+                        finalRadius,
+                        nextFinalRadius,
+                        lengthFactor,
+                        currentBodyAw,
+                        windSpeed
+                    );
+                }
+            }
+            bodyBallIndex++; 
+            void AddRippleMetaballsBetweenSegments(
+            GameObject parentIcicle,
+            Vector3 currentPointWorld,
+            Vector3 nextPointWorld,
+            float currentRadius,
+            float nextRadius,
+            float lengthFactor,
+            float currentBodyAw,
+            float windSpeed
+        )
+            {
+                if (parentIcicle == null) return;
+                if (rippleSegmentCount <= 0) return;
+
+                Vector3 tangent = nextPointWorld - currentPointWorld;
+                if (tangent.sqrMagnitude < 1e-6f) return;
+                tangent.Normalize();
+
+                // 현재 세그먼트와 다음 세그먼트 사이의 중간 단면
+                Vector3 bridgeCenter = (currentPointWorld + nextPointWorld) * 0.5f;
+                float mainRadius = (currentRadius + nextRadius) * 0.5f;
+
+                // 중간 단면의 로컬 원통 좌표계
+                Vector3 ortho1 = Vector3.Cross(tangent, Vector3.right);
+                if (ortho1.sqrMagnitude < 1e-6f)
+                    ortho1 = Vector3.Cross(tangent, Vector3.up);
+                ortho1.Normalize();
+
+                Vector3 ortho2 = Vector3.Cross(tangent, ortho1).normalized;
+
+                // 바람을 중간 단면 평면에 투영
+                Vector3 windH = new Vector3(windVector.x, 0f, windVector.z);
+                Vector3 windNorm = (windH.sqrMagnitude > 1e-6f) ? windH.normalized : Vector3.zero;
+
+                Vector3 windCross = Vector3.ProjectOnPlane(windNorm, tangent);
+                float crossWindAmount = windCross.magnitude;
+
+                if (crossWindAmount < 1e-6f) return;
+
+                Vector3 windCrossNorm = windCross.normalized;
+
+                // 풍속 영향
+                float windStrength = Mathf.Clamp01(
+                    (windSpeed * windSpeed) /
+                    Mathf.Max(0.0001f, rippleReferenceWindSpeed * rippleReferenceWindSpeed)
+                );
+
+                float awEffect = Mathf.Clamp01(Mathf.Abs(currentBodyAw));
+                float asymEffect = Mathf.Clamp01(windStrength * crossWindAmount * Mathf.Lerp(0.7f, 1.2f, awEffect));
+
+                // 끝부분으로 갈수록 리플 감소
+                float tipFade = 1f - Mathf.SmoothStep(rippleTipFadeStart, 1f, lengthFactor);
+                if (tipFade <= 0.01f) return;
+
+                // 약한 바람에서는 중립, 강한 바람에서는 풍상/풍하 차이 강조
+                float neutralRatio = (windwardRippleRatio + leewardRippleRatio) * 0.5f;
+
+                float dynamicWindwardRatio = Mathf.Lerp(
+                    neutralRatio,
+                    windwardRippleRatio,
+                    asymEffect
+                );
+
+                float dynamicLeewardRatio = Mathf.Lerp(
+                    neutralRatio,
+                    leewardRippleRatio,
+                    asymEffect
+                );
+
+                // 풍상은 촘촘하게, 풍하는 듬성하고 크게
+                int windwardCount = Mathf.Max(
+                    2,
+                    Mathf.RoundToInt(Mathf.Lerp(rippleSegmentCount + 2, rippleSegmentCount + 6, asymEffect))
+                );
+
+                int leewardCount = Mathf.Max(
+                    2,
+                    Mathf.RoundToInt(Mathf.Lerp(rippleSegmentCount, 3f, asymEffect))
+                );
+
+                float windwardArcDeg = Mathf.Lerp(180f, 130f, asymEffect);
+                float leewardArcDeg = Mathf.Lerp(180f, 110f, asymEffect);
+
+                // windCrossNorm 방향 = 풍하
+                Vector3 windwardCenterDir = -windCrossNorm;
+                Vector3 leewardCenterDir = windCrossNorm;
+
+                SpawnRippleArc(
+                    windwardCenterDir,
+                    windwardCount,
+                    windwardArcDeg,
+                    dynamicWindwardRatio,
+                    0.9f,
+                    0.9f,
+                    "WindwardRipple"
+                );
+
+                SpawnRippleArc(
+                    leewardCenterDir,
+                    leewardCount,
+                    leewardArcDeg,
+                    dynamicLeewardRatio,
+                    1.6f,
+                    1.2f,
+                    "LeewardRipple"
+                );
+
+                void SpawnRippleArc(
+                    Vector3 centerDir,
+                    int count,
+                    float arcDegrees,
+                    float radiusRatio,
+                    float protrudeScale,
+                    float radiusBoost,
+                    string label
+                )
+                {
+                    centerDir.Normalize();
+
+                    float centerAngle = Mathf.Atan2(
+                        Vector3.Dot(centerDir, ortho2),
+                        Vector3.Dot(centerDir, ortho1)
+                    );
+
+                    float arcRad = arcDegrees * Mathf.Deg2Rad;
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        float t = (count <= 1) ? 0.5f : (float)i / (count - 1);
+                        float angle = centerAngle - arcRad * 0.5f + arcRad * t;
+
+                        Vector3 dir =
+                            Mathf.Cos(angle) * ortho1 +
+                            Mathf.Sin(angle) * ortho2;
+
+                        dir.Normalize();
+
+                        float rippleRadius = mainRadius * radiusRatio;
+
+                        // 풍속 강할수록 강조
+                        rippleRadius *= Mathf.Lerp(0.85f, radiusBoost, asymEffect);
+
+                        // 끝부분 감소
+                        rippleRadius *= tipFade;
+
+                        if (rippleRadius < minRadius * 0.5f)
+                            continue;
+
+                        float embed = rippleRadius * rippleEmbedRatio;
+
+                        // 기존보다 확실히 바깥에 배치
+                        float centerDistance = mainRadius + rippleRadius * protrudeScale - embed;
+
+                        Vector3 rippleWorldPos = bridgeCenter + dir * centerDistance;
+
+                        GameObject ripple = new GameObject($"{label}_{generatedIcicleSegments.Count}");
+                        ripple.transform.SetParent(parentIcicle.transform, true);
+                        ripple.transform.position = rippleWorldPos;
+                        ripple.transform.rotation = Quaternion.identity;
+                        ripple.transform.localScale = Vector3.one;
+
+                        SphereCollider rippleCollider = ripple.AddComponent<SphereCollider>();
+                        rippleCollider.isTrigger = true;
+                        rippleCollider.radius = rippleRadius;
+
+                        generatedIcicleSegments.Add(ripple);
+
+                        if (debugWindNormal)
+                        {
+                            Color debugColor = label.Contains("Leeward")
+                                ? Color.blue
+                                : Color.red;
+
+                            Debug.DrawLine(
+                                bridgeCenter,
+                                rippleWorldPos,
+                                debugColor,
+                                debugDuration,
+                                false
+                            );
+                        }
+                    }
+                }
+            }
+
         }
     }
 
@@ -1553,9 +1820,6 @@ public class Theory_Surface : MonoBehaviour
 
         if (candidates.Count <= targetCount) return candidates;
 
-
-        float rMax = Mathf.Sqrt(totalArea / ((2f * candidates.Count) * Mathf.Sqrt(3f)));
-
         float idealDistance = Mathf.Sqrt(totalArea / (targetCount * 0.866f));
         float limitDist = 0.9f * idealDistance;
         float limitDistSq = limitDist * limitDist;
@@ -1742,7 +2006,7 @@ public class Theory_Surface : MonoBehaviour
                         tooClose = true;
                         break;
                     }
-                }
+                }        
 
                 if (!tooClose)
                 {
