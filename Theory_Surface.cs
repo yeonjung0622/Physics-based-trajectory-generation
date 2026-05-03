@@ -142,11 +142,26 @@ public class Theory_Surface : MonoBehaviour
     [Range(3, 12)] public int rippleSegmentCount = 6;
     public float windwardRippleRatio = 0.08f;
     public float leewardRippleRatio = 0.75f;
-    [Range(0f, 1f)] public float rippleEmbedRatio = 0.15f;
+    [Range(0f, 1f)] public float rippleEmbedRatio = 0.05f;
     [Range(0f, 1f)] public float rippleTipFadeStart = 0.8f;
 
     [Tooltip("이 풍속에 가까워질수록 풍상/풍하 리플 차이가 최대로 커짐")]
     public float rippleReferenceWindSpeed = 10.0f;
+
+    [Tooltip("바람 영향이 약할 때 기본 리플 크기")]
+    public float rippleNeutralRatio = 0.05f;
+
+    [Header("Cross-section Wind Asymmetry")]
+    [Range(0f, 0.3f)] public float windwardBodyShrink = 0.10f;
+    [Range(0f, 0.5f)] public float leewardBodyExpand = 0.25f;
+    [Range(0f, 0.35f)] public float leewardCenterShift = 0.18f;
+
+    [Range(0f, 1f)] public float rippleRootFadeStart = 0.12f;
+    [Range(0f, 1f)] public float rippleRootFadeEnd = 0.28f;
+
+
+
+
     // Start is called before the first frame update
     void Start()
     {
@@ -1277,19 +1292,19 @@ public class Theory_Surface : MonoBehaviour
 
             // 추가 Ripple metaball 배치
             bool canAddRipple =
-                enableRippleMetaball &&
-                overrideRadius < 0f &&
-                windSpeed > 0.05f &&
-                crossWindAmount > 1e-6f &&
-                rippleSegmentCount > 0 &&
-                rippleSegmentInterval > 0 &&
-                bodyBallIndex % rippleSegmentInterval == 0 &&
-                lengthFactor < 0.95f;
+              enableRippleMetaball &&
+              overrideRadius < 0f &&
+              windSpeed > 0.05f &&
+              rippleSegmentCount > 0 &&
+              rippleSegmentInterval > 0 &&
+              bodyBallIndex % rippleSegmentInterval == 0 &&
+              lengthFactor > 0.12f &&
+              lengthFactor < 0.78f;
 
             if (canAddRipple)
             {
                 // 현재 중심 메타볼과 다음 위치 사이에 리플 띠를 생성하기 위한 다음 위치 계산
-                float bandStep = Mathf.Max(minSpacing, finalRadius * 0.75f);
+                float bandStep = Mathf.Max(minSpacing, finalRadius * 0.4f);
                 float nextX = Mathf.Min(curX + bandStep, totalLength);
 
                 if (nextX > curX + 1e-5f)
@@ -1363,9 +1378,14 @@ public class Theory_Surface : MonoBehaviour
                 Vector3 windCross = Vector3.ProjectOnPlane(windNorm, tangent);
                 float crossWindAmount = windCross.magnitude;
 
-                if (crossWindAmount < 1e-6f) return;
+                if (crossWindAmount < 0.02f)
+                {
+                    Debug.Log($"[Ripple SKIP] crossWind too small: {crossWindAmount:F3}");
+                    return;
+                }
 
                 Vector3 windCrossNorm = windCross.normalized;
+                float effectiveCrossWind = Mathf.Clamp(crossWindAmount, 0.25f, 1.0f);
 
                 // 풍속 영향
                 float windStrength = Mathf.Clamp01(
@@ -1374,14 +1394,28 @@ public class Theory_Surface : MonoBehaviour
                 );
 
                 float awEffect = Mathf.Clamp01(Mathf.Abs(currentBodyAw));
-                float asymEffect = Mathf.Clamp01(windStrength * crossWindAmount * Mathf.Lerp(0.7f, 1.2f, awEffect));
+                float asymEffect = Mathf.Clamp01(
+                     windStrength * effectiveCrossWind * Mathf.Lerp(0.7f, 1.2f, awEffect)
+                 );
 
                 // 끝부분으로 갈수록 리플 감소
+                float rootFade = Mathf.SmoothStep(rippleRootFadeStart, rippleRootFadeEnd, lengthFactor);
                 float tipFade = 1f - Mathf.SmoothStep(rippleTipFadeStart, 1f, lengthFactor);
-                if (tipFade <= 0.01f) return;
 
-                // 약한 바람에서는 중립, 강한 바람에서는 풍상/풍하 차이 강조
-                float neutralRatio = (windwardRippleRatio + leewardRippleRatio) * 0.5f;
+                float rawBodyFade = rootFade * tipFade;
+
+                // 끝부분은 제외
+                if (lengthFactor > 0.90f)
+                {
+                    Debug.Log($"[Ripple SKIP] too close to tip, length={lengthFactor:F2}");
+                    return;
+                }
+
+                // 리플이 너무 작아져서 사라지는 것 방지
+                float bodyFade = Mathf.Max(rawBodyFade, 0.25f);
+
+
+                float neutralRatio = rippleNeutralRatio;
 
                 float dynamicWindwardRatio = Mathf.Lerp(
                     neutralRatio,
@@ -1397,17 +1431,18 @@ public class Theory_Surface : MonoBehaviour
 
                 // 풍상은 촘촘하게, 풍하는 듬성하고 크게
                 int windwardCount = Mathf.Max(
-                    2,
-                    Mathf.RoundToInt(Mathf.Lerp(rippleSegmentCount + 2, rippleSegmentCount + 6, asymEffect))
+                     6,
+                     Mathf.RoundToInt(Mathf.Lerp(rippleSegmentCount + 2, rippleSegmentCount + 4, asymEffect))
                 );
 
+                // 풍하: 크지만 듬성하게
                 int leewardCount = Mathf.Max(
-                    2,
-                    Mathf.RoundToInt(Mathf.Lerp(rippleSegmentCount, 3f, asymEffect))
+                    3,
+                    Mathf.RoundToInt(Mathf.Lerp(rippleSegmentCount * 0.6f, rippleSegmentCount * 0.45f, asymEffect))
                 );
 
-                float windwardArcDeg = Mathf.Lerp(180f, 130f, asymEffect);
-                float leewardArcDeg = Mathf.Lerp(180f, 110f, asymEffect);
+                float windwardArcDeg = Mathf.Lerp(150f, 120f, asymEffect);
+                float leewardArcDeg = Mathf.Lerp(180f, 160f, asymEffect);
 
                 // windCrossNorm 방향 = 풍하
                 Vector3 windwardCenterDir = -windCrossNorm;
@@ -1418,8 +1453,8 @@ public class Theory_Surface : MonoBehaviour
                     windwardCount,
                     windwardArcDeg,
                     dynamicWindwardRatio,
-                    0.9f,
-                    0.9f,
+                    0.35f,
+                    1.0f,
                     "WindwardRipple"
                 );
 
@@ -1428,8 +1463,8 @@ public class Theory_Surface : MonoBehaviour
                     leewardCount,
                     leewardArcDeg,
                     dynamicLeewardRatio,
-                    1.6f,
-                    1.2f,
+                    0.55f,
+                    1.15f,
                     "LeewardRipple"
                 );
 
@@ -1462,24 +1497,48 @@ public class Theory_Surface : MonoBehaviour
                             Mathf.Sin(angle) * ortho2;
 
                         dir.Normalize();
+                        //추가
+                        float leewardT = Mathf.Clamp01(
+                            (Vector3.Dot(dir, windCrossNorm) + 1f) * 0.5f
+                        );
 
-                        float rippleRadius = mainRadius * radiusRatio;
+                        // 풍상 방향은 외곽을 줄이고, 풍하 방향은 외곽을 확장
+                        float envelopeScale = Mathf.Lerp(
+                            1f - windwardBodyShrink * asymEffect,
+                            1f + leewardBodyExpand * asymEffect,
+                            leewardT
+                        );
 
-                        // 풍속 강할수록 강조
-                        rippleRadius *= Mathf.Lerp(0.85f, radiusBoost, asymEffect);
+                        bool isLeeward = label.Contains("Leeward");
 
-                        // 끝부분 감소
-                        rippleRadius *= tipFade;
+                        // bodyFade를 그대로 곱하지 않고 완화
+                        float visibleFade = Mathf.Lerp(0.65f, 1.0f, bodyFade);
+
+                        float rippleRadius = mainRadius * radiusRatio * visibleFade;
+
+                        float sideScale = isLeeward
+                            ? Mathf.Lerp(1.0f, 1.25f, asymEffect)
+                            : Mathf.Lerp(1.0f, 1.05f, asymEffect);
+
+                        rippleRadius *= sideScale;
+
+                        // 너무 작지도, 너무 크지도 않게 mainRadius 기준으로 제한
+                        float minRatio = isLeeward ? 0.09f : 0.07f;
+                        float maxRatio = isLeeward ? 0.42f : 0.28f;
+
+                        rippleRadius = Mathf.Clamp(rippleRadius, mainRadius * minRatio, mainRadius * maxRatio);
 
                         if (rippleRadius < minRadius * 0.5f)
                             continue;
 
-                        float embed = rippleRadius * rippleEmbedRatio;
+                        float centerShift = mainRadius * leewardCenterShift * asymEffect * bodyFade * 0.5f;
+                        Vector3 biasedCenter = bridgeCenter + windCrossNorm * centerShift;
 
-                        // 기존보다 확실히 바깥에 배치
-                        float centerDistance = mainRadius + rippleRadius * protrudeScale - embed;
+                        // 몸통 표면에 붙게 배치
+                        float protrude = rippleRadius * (1f - rippleEmbedRatio);
+                        float centerDistance = mainRadius + protrude;
 
-                        Vector3 rippleWorldPos = bridgeCenter + dir * centerDistance;
+                        Vector3 rippleWorldPos = biasedCenter + dir * centerDistance;
 
                         GameObject ripple = new GameObject($"{label}_{generatedIcicleSegments.Count}");
                         ripple.transform.SetParent(parentIcicle.transform, true);
@@ -1500,7 +1559,7 @@ public class Theory_Surface : MonoBehaviour
                                 : Color.red;
 
                             Debug.DrawLine(
-                                bridgeCenter,
+                                biasedCenter, 
                                 rippleWorldPos,
                                 debugColor,
                                 debugDuration,
