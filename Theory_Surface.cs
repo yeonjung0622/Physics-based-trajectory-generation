@@ -1447,24 +1447,25 @@ public class Theory_Surface : MonoBehaviour
                 // windCrossNorm 방향 = 풍하
                 Vector3 windwardCenterDir = -windCrossNorm;
                 Vector3 leewardCenterDir = windCrossNorm;
-
+                // 풍상: 크게, 더 튀어나오게
                 SpawnRippleArc(
                     windwardCenterDir,
                     windwardCount,
                     windwardArcDeg,
                     dynamicWindwardRatio,
-                    0.35f,
-                    1.0f,
+                    0.75f,
+                    1.25f,
                     "WindwardRipple"
                 );
 
+                // 풍하: 작고 완만하게
                 SpawnRippleArc(
                     leewardCenterDir,
                     leewardCount,
                     leewardArcDeg,
                     dynamicLeewardRatio,
-                    0.55f,
-                    1.15f,
+                    0.35f,
+                    0.85f,
                     "LeewardRipple"
                 );
 
@@ -1509,33 +1510,44 @@ public class Theory_Surface : MonoBehaviour
                             leewardT
                         );
 
+                        bool isWindward = label.Contains("Windward");
                         bool isLeeward = label.Contains("Leeward");
 
-                        // bodyFade를 그대로 곱하지 않고 완화
+                        // bodyFade를 그대로 곱하면 리플이 너무 작아지므로 완화
                         float visibleFade = Mathf.Lerp(0.65f, 1.0f, bodyFade);
 
+                        // 기본 리플 반지름
                         float rippleRadius = mainRadius * radiusRatio * visibleFade;
 
-                        float sideScale = isLeeward
-                            ? Mathf.Lerp(1.0f, 1.25f, asymEffect)
-                            : Mathf.Lerp(1.0f, 1.05f, asymEffect);
+                        // 풍상은 더 크게, 풍하는 더 작게
+                        float sideScale = isWindward
+                            ? Mathf.Lerp(1.05f, radiusBoost, asymEffect)   // 풍상: 1.05 → 1.25
+                            : Mathf.Lerp(0.95f, radiusBoost, asymEffect);  // 풍하: 0.95 → 0.85
 
                         rippleRadius *= sideScale;
 
-                        // 너무 작지도, 너무 크지도 않게 mainRadius 기준으로 제한
-                        float minRatio = isLeeward ? 0.09f : 0.07f;
-                        float maxRatio = isLeeward ? 0.42f : 0.28f;
+                        // 풍상 메타볼은 크게 허용, 풍하 메타볼은 작게 제한
+                        float minRatio = isWindward ? 0.10f : 0.05f;
+                        float maxRatio = isWindward ? 0.42f : 0.22f;
 
-                        rippleRadius = Mathf.Clamp(rippleRadius, mainRadius * minRatio, mainRadius * maxRatio);
+                        rippleRadius = Mathf.Clamp(
+                            rippleRadius,
+                            mainRadius * minRatio,
+                            mainRadius * maxRatio
+                        );
 
                         if (rippleRadius < minRadius * 0.5f)
                             continue;
 
-                        float centerShift = mainRadius * leewardCenterShift * asymEffect * bodyFade * 0.5f;
-                        Vector3 biasedCenter = bridgeCenter + windCrossNorm * centerShift;
+                        // 풍상 쪽은 약간 더 풍상 방향으로, 풍하 쪽은 약하게만 이동
+                        float centerShiftAmount = mainRadius * leewardCenterShift * asymEffect * bodyFade;
+                        Vector3 shiftDir = isWindward ? -windCrossNorm : windCrossNorm;
+                        float shiftScale = isWindward ? 0.60f : 0.15f;
 
-                        // 몸통 표면에 붙게 배치
-                        float protrude = rippleRadius * (1f - rippleEmbedRatio);
+                        Vector3 biasedCenter = bridgeCenter + shiftDir * centerShiftAmount * shiftScale;
+
+                        // 몸통 표면에 붙이되, 풍상 쪽은 더 돌출
+                        float protrude = rippleRadius * (1f - rippleEmbedRatio) * protrudeScale;
                         float centerDistance = mainRadius + protrude;
 
                         Vector3 rippleWorldPos = biasedCenter + dir * centerDistance;
