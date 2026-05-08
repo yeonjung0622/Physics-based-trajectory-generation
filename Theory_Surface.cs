@@ -908,7 +908,26 @@ public class Theory_Surface : MonoBehaviour
             Vector3 finalWindDir = (finalWindH.sqrMagnitude > 1e-6f) ? finalWindH.normalized : Vector3.zero;
 
             float windSpeed = finalWindH.magnitude;
-            CreateMetaballSegments(trajectoryHelper, trajectoryHelper, localPoints, avgScale, Aw, waterValue, finalWindDir, windSpeed);
+
+            float rMeters = dropletRadiusMm / 1000f;
+            float eta = IciclePhysics.CalculateEta(Temperature);
+            float Re = IciclePhysics.CalculateReynolds(windSpeed, rMeters, eta);
+            float cd = IciclePhysics.CalculateCd(Re);
+            float tanTheory = IciclePhysics.CalculateTanTheory(windSpeed, rMeters, cd);
+
+            CreateMetaballSegments(
+                trajectoryHelper,
+                trajectoryHelper,
+                localPoints,
+                avgScale,
+                Aw,
+                waterValue,
+                finalWindDir,
+                windSpeed,
+                tanTheory,
+                Temperature
+            );
+
             BaseOfIcicles(trajectoryHelper, vIdx);
 
             OriginMCBlob metaballController = trajectoryHelper.GetComponent<OriginMCBlob>();
@@ -1034,8 +1053,11 @@ public class Theory_Surface : MonoBehaviour
         return dotProduct >= angleThreshold;
     }
 
-    private void CreateMetaballSegments(GameObject metaballIcicle, GameObject trajectoryHelper, List<Vector3> trajectory,
-        float avgScale, float Aw, float waterValue, Vector3 windDir, float windSpeed)
+    private void CreateMetaballSegments(GameObject metaballIcicle,
+        GameObject trajectoryHelper,
+        List<Vector3> trajectory,
+        float avgScale, float Aw, float waterValue, 
+        Vector3 windDir, float windSpeed, float tanTheory, float tempCelsius)
     {
         if (trajectory == null || trajectory.Count <= 1) return;
 
@@ -1169,9 +1191,15 @@ public class Theory_Surface : MonoBehaviour
             baseRadius *= (1.0f + rootThickness);
 
             float rootAw = Aw;
-            float windDrivenAw = 0.85f;
-            float referenceWindSpeed = 10.0f;
-            float windStrength = Mathf.Clamp01((windSpeed * windSpeed) / (referenceWindSpeed * referenceWindSpeed));
+
+            float windDrivenAw = IciclePhysics.ComputeWindDrivenAw(
+                tanTheory,
+                crossWindAmount,
+                tempCelsius,
+                waterValue
+            );
+
+            float windStrength = IciclePhysics.CalculateIU(windSpeed);
 
             float bodyBiasLerp = lengthFactor * windStrength;
             float currentBodyAw = Mathf.Lerp(rootAw, windDrivenAw, bodyBiasLerp);
@@ -1618,7 +1646,6 @@ public class Theory_Surface : MonoBehaviour
 
         return Mathf.Clamp(R, minRadius, 2.0f);
     }
-
     // 4.4.3 Base of Icicle 
     private void BaseOfIcicles(GameObject parentIcicle, int mainDripPointIndex)
     {
