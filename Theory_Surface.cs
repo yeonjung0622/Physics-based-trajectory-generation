@@ -1444,13 +1444,13 @@ public class Theory_Surface : MonoBehaviour
                     10
                 );
 
-                // «≥ªÛ: Ω√∞¢¿˚¿∏∑Œ ¥ı √Œ√Œ«œ∞‘
+                // «≥ªÛ
                 int windwardCount = Mathf.Max(
                     baseRippleCount + 1,
                     Mathf.RoundToInt(baseRippleCount + Mathf.Lerp(2f, 4f, asymEffect))
                 );
 
-                // «≥«œ: ∫Ò±≥¿˚ µÎº∫«œ∞‘
+                // «≥«œ
                 int leewardCount = Mathf.Max(
                     3,
                     Mathf.RoundToInt(baseRippleCount * Mathf.Lerp(0.7f, 0.5f, asymEffect))
