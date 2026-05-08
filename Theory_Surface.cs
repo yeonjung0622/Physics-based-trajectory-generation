@@ -127,14 +127,6 @@ public class Theory_Surface : MonoBehaviour
     [Tooltip("드립 포인트 간 최소 거리: 고드름이 너무 뭉치는 것을 방지합니다.")]
     public float minDripDistance = 0.1f;
 
-    [Header("Wind Normal Debug")]
-    public bool debugWindNormal = true;
-    [Range(3, 24)] public int debugSide = 6; 
-    public float debugNormalLength = 0.04f;
-    public float debugAxisLength = 0.05f;
-    public float debugDuration = 2.0f;
-    public int debugEveryNthBall = 6;
-
     [Header("Ripple of metaball")]
     public bool enableRippleMetaball = true;
 
@@ -150,7 +142,13 @@ public class Theory_Surface : MonoBehaviour
     [Range(0f, 1f)]
     public float rippleEmbedRatio = 0.40f;
 
-
+    //모든 메시에 적용되도록
+    private float meshLocalSize = 1f;
+    private float meshWorldSize = 1f;
+    private float avgEdgeLocal = 0.01f;
+    private float avgEdgeWorld = 0.01f;
+    private float surfaceEpsilonLocal = 0.001f;
+    private float surfaceEpsilonWorld = 0.001f;
 
 
     // Start is called before the first frame update
@@ -216,7 +214,15 @@ public class Theory_Surface : MonoBehaviour
 
         vertices = mesh.vertices;
         normals = mesh.normals;
+        //추가
+        if (normals == null || normals.Length != vertices.Length)
+        {
+            mesh.RecalculateNormals();
+            normals = mesh.normals;
+        }
 
+        PrepareMeshMetrics();
+        EnsureSurfaceCollider();
         mesh.colors = colors;
 
         Debug.Log("Start() 초기화 완료.", this);
@@ -528,7 +534,10 @@ public class Theory_Surface : MonoBehaviour
             if (h < minHeightAlongGravity) minHeightAlongGravity = h;
         }
 
-        float gravityBasedBottomThreshold = minHeightAlongGravity + 0.05f;
+        float gravityBasedBottomThreshold =
+    minHeightAlongGravity + Mathf.Max(meshLocalSize * 0.01f, avgEdgeLocal * 0.5f);
+
+        float waterThreshold = Mathf.Max(maxWaterAmount * 0.01f, 1e-6f);
 
         float angleThreshold = Mathf.Cos(dripLimitAngle * Mathf.Deg2Rad);
 
@@ -541,7 +550,7 @@ public class Theory_Surface : MonoBehaviour
             float water = waterCoeff[i];
 
             // 1. 물이 충분히 있는가?
-            if (water < 0.01f) continue;
+            if (water < waterThreshold) continue;
 
             // 2. 중력 방향 기준으로 너무 아래쪽인가?
             float heightAlongGravity = Vector3.Dot(vertices[i], -g);
@@ -691,9 +700,25 @@ public class Theory_Surface : MonoBehaviour
         Transform meshTr = this.transform;
 
         int vIdx = gizmoVertexIndices[icicleIndex];
+
+        Vector3 localNormal = SafeLocalNormal(vertices[vIdx], normals[vIdx]);
         Vector3 worldDripPoint = meshTr.TransformPoint(vertices[vIdx]);
-        Vector3 worldNormal = meshTr.TransformDirection(normals[vIdx]).normalized;
-        Vector3 currentWorldPos = worldDripPoint + worldNormal * (0.01f * avgScale);
+        Vector3 worldNormal = LocalNormalToWorld(localNormal);
+
+        float waterValue = Mathf.Clamp01(waterCoeff[vIdx] / maxWaterAmount);
+        float w = Mathf.Clamp01(waterValue);
+
+        // 메시 크기 기준으로 최대 길이 제한
+        float lengthCap = Mathf.Min(maxIcicleLength, meshWorldSize * 0.45f);
+        float maxLength = Mathf.Max(meshWorldSize * 0.03f, lengthCap / (1.0f + 3.0f * w));
+
+        // 뿌리 반지름 기준으로 표면 밖으로 띄우기
+        float rootRadius = IcicleProfile(0f, maxLength, windVector.magnitude);
+        float rootClearance = Mathf.Max(surfaceEpsilonWorld, rootRadius * 0.75f);
+
+        Vector3 currentWorldPos = worldDripPoint + worldNormal * rootClearance;
+
+
 
         // 1) LineRenderer 세팅 (회전은 따라가되, 스케일은 중화)
         GameObject trajectoryHelper = new GameObject($"IcicleLine_{icicleIndex}");
@@ -729,13 +754,6 @@ public class Theory_Surface : MonoBehaviour
         // 2) 성장 상태 변수
         float current_tan_phi = 0.0f;
         float accumulatedLength = 0f;
-
-        float waterValue = Mathf.Clamp01(waterCoeff[vIdx] / maxWaterAmount);
-        //float maxLength = maxIcicleLength * waterValue;
-
-        //수분량이 많을수록 (1에 가까울수록) 최대 길이 감소
-        float w = Mathf.Clamp01(waterValue);
-        float maxLength = maxIcicleLength / (1.0f + 3.0f * w);
 
         bool isOnSurface = false;
         Vector3 currentNormal = worldNormal;
@@ -790,7 +808,11 @@ public class Theory_Surface : MonoBehaviour
 
             // 다음 위치 기본값(월드)
             Vector3 stepDirection = (Vector3.down + windDirectionHorizontal * current_tan_phi).normalized;
-            float stepLen = segmentLength;
+            float stepLen = Mathf.Clamp(
+                segmentLength,
+                avgEdgeWorld * 0.75f,
+                meshWorldSize * 0.04f
+                );
             Vector3 nextWorldPos = currentWorldPos + stepDirection * stepLen;
 
             RaycastHit hit;
@@ -1211,83 +1233,7 @@ public class Theory_Surface : MonoBehaviour
             float offsetAmount = baseRadius * currentBodyAw * windBias * crossWindAmount;
             Vector3 asymmetryOffset = (crossWindAmount > 1e-6f) ? windCrossNorm * offsetAmount : Vector3.zero;
             pointInWorld += asymmetryOffset;
-
-            bool shouldDebugDraw = debugWindNormal &&
-                                   (debugEveryNthBall <= 1 || generatedIcicleSegments.Count % debugEveryNthBall == 0);
-
-            if (shouldDebugDraw)
-            {
-                // tangent 축: 노랑
-                Debug.DrawLine(
-                    pointInWorld - tangent * debugAxisLength,
-                    pointInWorld + tangent * debugAxisLength,
-                    Color.yellow,
-                    debugDuration,
-                    false
-                );
-
-                // 단면에 투영된 wind 방향: 하늘
-                if (crossWindAmount > 1e-6f)
-                {
-                    Debug.DrawLine(
-                        pointInWorld,
-                        pointInWorld + windCrossNorm * debugAxisLength * 1.3f,
-                        Color.cyan,
-                        debugDuration,
-                        false
-                    );
-                }
-
-                // ortho 축 2개: 흰색 / 회색
-                Debug.DrawLine(
-                    pointInWorld,
-                    pointInWorld + ortho1 * debugAxisLength,
-                    Color.white,
-                    debugDuration,
-                    false
-                );
-
-                Debug.DrawLine(
-                    pointInWorld,
-                    pointInWorld + ortho2 * debugAxisLength,
-                    Color.gray,
-                    debugDuration,
-                    false
-                );
-
-                // 단면 샘플 normal들: 풍상=빨강, 풍하=파랑
-                float visualAw = Mathf.Abs(currentBodyAw);
-
-                for (int s = 0; s < debugSide; s++)
-                {
-                    float theta = s * (2f * Mathf.PI) / debugSide;
-                    Vector3 surfaceNormal =
-                        (ortho1 * Mathf.Cos(theta) + ortho2 * Mathf.Sin(theta)).normalized;
-
-                    // +1 = 풍상 / -1 = 풍하
-                    float signedDot = (crossWindAmount > 1e-6f)
-                        ? Vector3.Dot(surfaceNormal, -windCrossNorm)
-                        : 0f;
-
-                    float directionalWeight = 1.0f + visualAw * (-signedDot);
-                    directionalWeight = Mathf.Max(0.2f, directionalWeight);
-
-                    float lineLen = debugNormalLength * directionalWeight;
-
-                    Color c = (crossWindAmount > 1e-6f)
-                        ? Color.Lerp(Color.blue, Color.red, (signedDot + 1f) * 0.5f)
-                        : Color.green;
-
-                    Debug.DrawLine(
-                        pointInWorld,
-                        pointInWorld + surfaceNormal * lineLen,
-                        c,
-                        debugDuration,
-                        false
-                    );
-                }
-            }
-
+            
 
             if (positionNoiseAmount > 0f)
             {
@@ -1604,20 +1550,6 @@ public class Theory_Surface : MonoBehaviour
 
                         generatedIcicleSegments.Add(ripple);
 
-                        if (debugWindNormal)
-                        {
-                            Color debugColor = label.Contains("Leeward")
-                                ? Color.blue
-                                : Color.red;
-
-                            Debug.DrawLine(
-                                biasedCenter, 
-                                rippleWorldPos,
-                                debugColor,
-                                debugDuration,
-                                false
-                            );
-                        }
                     }
                 }
             }
@@ -1650,7 +1582,11 @@ public class Theory_Surface : MonoBehaviour
     private void BaseOfIcicles(GameObject parentIcicle, int mainDripPointIndex)
     {
 
-        float eb = baseSpreadDistance;    // influence radius (e_b)
+        float eb = Mathf.Clamp(
+            baseSpreadDistance,
+            avgEdgeLocal * 2f,
+            meshLocalSize * 0.10f
+            );
         int nmb = baseMetaballCount;      // number of base metaballs (n_mb)
         if (parentIcicle == null || eb <= 0f || nmb <= 0) return;
 
@@ -1713,16 +1649,20 @@ public class Theory_Surface : MonoBehaviour
         {
             int idx = nearby[k];
             Vector3 vLocal = vertices[idx];
-            Vector3 vNorm = normals[idx].normalized;
-
+            Vector3 vNorm = SafeLocalNormal(vLocal, normals[idx]);
 
             float dLocal = geod.TryGetValue(idx, out var dd) ? dd : eb;
             float numer = Mathf.Max(0f, eb - dLocal);
             float falloff = (numer * numer) / (eb * eb);
-            float rb = falloff * wcDrip * 0.2f;
 
-            Vector3 worldPos = transform.TransformPoint(vLocal);
+            float rb = falloff * wcDrip * meshLocalSize * 0.035f;
 
+            if (rb < surfaceEpsilonLocal)
+                continue;
+
+            // 메타볼 중심을 표면 밖으로 이동
+            float offset = Mathf.Max(rb * 0.6f, surfaceEpsilonLocal);
+            Vector3 worldPos = transform.TransformPoint(vLocal + vNorm * offset);
 
             // Create metaball object
             GameObject seg = new GameObject($"IcicleBase_{idx}");
@@ -1750,7 +1690,9 @@ public class Theory_Surface : MonoBehaviour
         if (triangleAreas == null || triangleAreas.Length == 0) CalculateMeshAreas();
 
         // 2) 중력 방향 (로컬)
-        Vector3 worldGravityDir = raycastSource.TransformDirection(Vector3.down).normalized;
+        Vector3 worldGravityDir = raycastSource != null
+                ? raycastSource.TransformDirection(Vector3.down).normalized
+                : Vector3.down;
         Vector3 localGravityDir = transform.InverseTransformDirection(worldGravityDir).normalized;
 
         // 3) 높이 범위 계산 (물 있는 곳만)
@@ -1773,24 +1715,72 @@ public class Theory_Surface : MonoBehaviour
         glazeIceContainer.transform.localRotation = Quaternion.identity;
         glazeIceContainer.transform.localScale = Vector3.one;
 
-        OriginMCBlob glazeMetaball = glazeIceContainer.AddComponent<OriginMCBlob>();
-        glazeIceContainer.AddComponent<MeshFilter>();
-        glazeIceContainer.AddComponent<MeshRenderer>();
+        OriginMCBlob glazeMetaball = glazeIceContainer.GetComponent<OriginMCBlob>();
+        if (glazeMetaball == null)
+        {
+            glazeMetaball = glazeIceContainer.AddComponent<OriginMCBlob>();
+        }
+
+        // OriginMCBlob을 추가하는 과정에서 MeshFilter/MeshRenderer가 자동으로 붙을 수 있으므로
+        // AddComponent를 바로 하지 말고 GetComponent로 먼저 확인
+        MeshFilter glazeFilter = glazeIceContainer.GetComponent<MeshFilter>();
+        if (glazeFilter == null)
+        {
+            glazeFilter = glazeIceContainer.AddComponent<MeshFilter>();
+        }
+
+        MeshRenderer glazeRenderer = glazeIceContainer.GetComponent<MeshRenderer>();
+        if (glazeRenderer == null)
+        {
+            glazeRenderer = glazeIceContainer.AddComponent<MeshRenderer>();
+        }
+
+        // 빙막 재질 적용
+        if (ice != null)
+        {
+            glazeRenderer.material = ice;
+        }
+        else
+        {
+            glazeRenderer.material = new Material(Shader.Find("Standard"));
+        }
+
+        if (ice != null)
+        {
+            glazeRenderer.material = ice;
+        }
+        else
+        {
+            glazeRenderer.material = new Material(Shader.Find("Standard"));
+        }
 
         // 블루 노이즈 샘플링
         int targetCount = Mathf.Max(1, Mathf.RoundToInt(ngi));
         List<IceCandidate> points = GenerateBlueNoiseSamples(targetCount, localGravityDir, minH, heightRange);
         if (points == null || points.Count == 0) return;
 
-        float surfaceOffsetFactor = 0.02f;
+        float surfaceOffsetFactor = 0.55f;
 
 
         for (int i = 0; i < points.Count; i++)
         {
             var p = points[i];
 
-            float rLocal = p.radius; //메쉬의 로컬 기준 반지름
-            Vector3 pos = p.localPos + p.normal * (rLocal * surfaceOffsetFactor);
+            float waterN = Mathf.Clamp01(p.waterAmount / Mathf.Max(maxWaterAmount, 1e-6f));
+
+            if (waterN < 0.02f)
+                continue;
+
+            Vector3 safeNormal = SafeLocalNormal(p.localPos, p.normal);
+
+            float rLocal = Mathf.Max(
+                 p.radius * Mathf.Lerp(0.9f, 1.4f, waterN),
+                 surfaceEpsilonLocal * 2.0f
+             );
+
+            float offset = Mathf.Max(rLocal * surfaceOffsetFactor, surfaceEpsilonLocal);
+
+            Vector3 pos = p.localPos + safeNormal * offset;
 
             GameObject seg = new GameObject($"GlazeIce_Seg_{i}");
             seg.transform.SetParent(glazeIceContainer.transform, false);
@@ -1800,7 +1790,7 @@ public class Theory_Surface : MonoBehaviour
 
             SphereCollider sc = seg.AddComponent<SphereCollider>();
             sc.isTrigger = true;
-            sc.radius = rLocal * 1.2f;
+            sc.radius = rLocal;
         }
 
         //그리드 설정
@@ -1831,7 +1821,7 @@ public class Theory_Surface : MonoBehaviour
         float padding = Mathf.Max(maxR * 1.0f, 0.02f);
         Vector3 size = b.size + Vector3.one * padding;
 
-        float targetVoxelSize = Mathf.Max(maxR * 0.15f, 0.001f);
+        float targetVoxelSize = Mathf.Max(maxR * 0.35f, 0.0025f);
 
         // 2. 결정된 Voxel 크기로 각 축의 해상도(dim) 계산
         int rx = Mathf.CeilToInt(size.x / targetVoxelSize);
@@ -1856,7 +1846,7 @@ public class Theory_Surface : MonoBehaviour
         glazeMetaball.dimZ = Mathf.Max(rz, 64);
 
         // 5. 임계값 조절 
-        glazeMetaball.isoLevel = 0.3f;
+        glazeMetaball.isoLevel = 0.25f;
 
         glazeMetaball.RefreshBlobList();
         glazeMetaball.GenerateMesh();
@@ -1910,10 +1900,17 @@ public class Theory_Surface : MonoBehaviour
             float dUp = 1f - dNorm;
             float lt = Mathf.Clamp01(lifeTime);
 
-            float rGI = minGI + scaling * (dUp * lt + dDown * (1f - lt));
+            float adaptiveMinGI = Mathf.Max(minGI, meshLocalSize * 0.001f);
+            float adaptiveScaling = Mathf.Clamp(
+                scaling,
+                meshLocalSize * 0.002f,
+                meshLocalSize * 0.04f
+            );
 
+            float rGI = ComputeAdaptiveGlazeRadius(dUp, dDown); 
 
-            if (rGI <= 0f) rGI = minGI + 0.003f;
+            if (rGI <= 0f)
+                rGI = adaptiveMinGI;
 
             candidates.Add(new IceCandidate
             {
@@ -2137,6 +2134,128 @@ public class Theory_Surface : MonoBehaviour
         Debug.Log($"Glaze Ice 최종: {result.Count}/{targetCount}개 생성");
 
         return result;
+    }
+
+
+    private float ComputeAdaptiveGlazeRadius(float dUp, float dDown)
+    {
+        float lt = Mathf.Clamp01(lifeTime);
+
+        float adaptiveMinGI = Mathf.Max(minGI, meshLocalSize * 0.001f);
+        float adaptiveScaling = Mathf.Clamp(
+            scaling,
+            meshLocalSize * 0.002f,
+            meshLocalSize * 0.04f
+        );
+
+        return adaptiveMinGI + adaptiveScaling * (dUp * lt + dDown * (1f - lt));
+    }
+
+    //모든 메시에 동일하도록 추가
+    private void PrepareMeshMetrics()
+    {
+        Bounds localBounds = mesh.bounds;
+
+        meshLocalSize = Mathf.Max(
+            localBounds.size.x,
+            localBounds.size.y,
+            localBounds.size.z,
+            0.0001f
+        );
+
+        Bounds worldBounds = new Bounds(transform.TransformPoint(vertices[0]), Vector3.zero);
+        for (int i = 1; i < vertices.Length; i++)
+        {
+            worldBounds.Encapsulate(transform.TransformPoint(vertices[i]));
+        }
+
+        meshWorldSize = Mathf.Max(
+            worldBounds.size.x,
+            worldBounds.size.y,
+            worldBounds.size.z,
+            0.0001f
+        );
+
+        avgEdgeLocal = ComputeAverageEdgeLength(false);
+        avgEdgeWorld = ComputeAverageEdgeLength(true);
+
+        surfaceEpsilonLocal = Mathf.Max(meshLocalSize * 0.002f, avgEdgeLocal * 0.25f, 0.0005f);
+        surfaceEpsilonWorld = Mathf.Max(meshWorldSize * 0.002f, avgEdgeWorld * 0.25f, 0.0005f);
+    }
+
+    private float ComputeAverageEdgeLength(bool worldSpace)
+    {
+        int[] tris = mesh.triangles;
+        if (tris == null || tris.Length < 3) return 0.01f;
+
+        float sum = 0f;
+        int count = 0;
+
+        for (int i = 0; i < tris.Length; i += 3)
+        {
+            AddEdgeLength(tris[i], tris[i + 1]);
+            AddEdgeLength(tris[i + 1], tris[i + 2]);
+            AddEdgeLength(tris[i + 2], tris[i]);
+        }
+
+        return count > 0 ? sum / count : 0.01f;
+
+        void AddEdgeLength(int a, int b)
+        {
+            Vector3 pa = worldSpace ? transform.TransformPoint(vertices[a]) : vertices[a];
+            Vector3 pb = worldSpace ? transform.TransformPoint(vertices[b]) : vertices[b];
+
+            sum += Vector3.Distance(pa, pb);
+            count++;
+        }
+    }
+
+    private void EnsureSurfaceCollider()
+    {
+        surfaceCollider = GetComponent<Collider>();
+
+        if (surfaceCollider == null)
+        {
+            MeshCollider mc = gameObject.AddComponent<MeshCollider>();
+            mc.sharedMesh = meshFilterComponent.sharedMesh;
+            mc.convex = false;
+            surfaceCollider = mc;
+        }
+
+        if (collisionLayers.value == 0)
+        {
+            collisionLayers = 1 << gameObject.layer;
+        }
+    }
+
+    //노말 정상화
+    private Vector3 SafeLocalNormal(Vector3 localPos, Vector3 localNormal)
+    {
+        Vector3 n = localNormal;
+
+        if (n.sqrMagnitude < 1e-8f)
+        {
+            n = (localPos - mesh.bounds.center).normalized;
+        }
+        else
+        {
+            n.Normalize();
+        }
+
+        Vector3 fromCenter = (localPos - mesh.bounds.center).normalized;
+
+        if (Vector3.Dot(n, fromCenter) < -0.2f)
+        {
+            n = -n;
+        }
+
+        return n;
+    }
+
+    private Vector3 LocalNormalToWorld(Vector3 localNormal)
+    {
+        // 비균일 스케일이 있는 메시에서도 노말 방향이 덜 깨지도록 보정
+        return transform.worldToLocalMatrix.transpose.MultiplyVector(localNormal).normalized;
     }
 
 }
