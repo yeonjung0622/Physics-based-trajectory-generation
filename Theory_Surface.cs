@@ -356,16 +356,17 @@ public class Theory_Surface : MonoBehaviour
 
 
         float runningMax = 1e-6f;
-
+        HashSet<int> visited = new HashSet<int>();
         for (int v_index = 0; v_index < vertices.Length; v_index++)
         {
+            visited.Clear();
+
             int c = v_index;
             Vector3 cPos = vertices[c];
 
             float wc = 0f;
-
-            HashSet<int> visited = new HashSet<int>();
-            visited.Add(c);
+ 
+            visited.Add(v_index);
 
             int iter = 0;
 
@@ -950,7 +951,7 @@ public class Theory_Surface : MonoBehaviour
                 Temperature
             );
 
-            BaseOfIcicles(trajectoryHelper, vIdx);
+            BaseOfIcicles(trajectoryHelper, vIdx, rootRadius);
 
             OriginMCBlob metaballController = trajectoryHelper.GetComponent<OriginMCBlob>();
             if (metaballController == null)
@@ -1107,6 +1108,8 @@ public class Theory_Surface : MonoBehaviour
         int safety = 0;
         int maxBalls = 8000;
         int bodyBallIndex = 0;
+
+        float lastRippleX = -999f; 
         // 시작점
         Place(trajectory[0], 0f, 0);
 
@@ -1239,7 +1242,8 @@ public class Theory_Surface : MonoBehaviour
             {
                 float t01 = (totalLength <= 1e-6f) ? 0f : (curX / totalLength);
                 float noiseScale = Mathf.Lerp(1f, 0f, Mathf.SmoothStep(0.7f, 1f, t01));
-                Vector2 rnd = Random.insideUnitCircle * (positionNoiseAmount * noiseScale);
+                float adaptiveNoise = Mathf.Min(positionNoiseAmount, meshWorldSize * 0.01f);
+                Vector2 rnd = Random.insideUnitCircle * (adaptiveNoise * noiseScale);
                 Vector3 off = trajectoryHelper.transform.right * rnd.x + trajectoryHelper.transform.up * rnd.y;
                 pointInWorld += off;
             }
@@ -1255,25 +1259,28 @@ public class Theory_Surface : MonoBehaviour
             sc.radius = finalRadius;
             generatedIcicleSegments.Add(g);
 
-            // 기존 rippleFrequency를 이용해 리플 생성 간격 결정
-            // rippleFrequency가 높을수록 더 촘촘하게 생성
-            int intervalFromFrequency = Mathf.Clamp(
-                Mathf.RoundToInt(24f / Mathf.Max(1f, rippleFrequency)),
-                1,
-                4
-            );
-
             // 뿌리 부분에도 약하게 리플이 생기도록 시작 구간을 앞당김
             float rippleStartByLength = 0.05f;
 
             // tipZone은 기존 CreateMetaballSegments 안에 있는 값 사용
             float rippleEndByLength = 1f - tipZone * 1.4f;
 
+            float physicalRippleSpacing = ComputePhysicalRippleSpacing(
+                finalRadius,
+                lengthFactor,
+                waterValue,
+                windSpeed,
+                crossWindAmount,
+                currentBodyAw,
+                tempCelsius
+            );
+            bool spacingReady = (curX - lastRippleX) >= physicalRippleSpacing;
+
             bool canAddRipple =
                 enableRippleMetaball &&
                 overrideRadius < 0f &&
                 windSpeed > 0.05f &&
-                bodyBallIndex % intervalFromFrequency == 0 &&
+                spacingReady &&
                 lengthFactor > rippleStartByLength &&
                 lengthFactor < rippleEndByLength;
 
@@ -1314,6 +1321,7 @@ public class Theory_Surface : MonoBehaviour
                         currentBodyAw,
                         windSpeed
                     );
+                    lastRippleX = curX; 
                 }
             }
             bodyBallIndex++; 
@@ -1578,39 +1586,116 @@ public class Theory_Surface : MonoBehaviour
 
         return Mathf.Clamp(R, minRadius, 2.0f);
     }
-    // 4.4.3 Base of Icicle 
-    private void BaseOfIcicles(GameObject parentIcicle, int mainDripPointIndex)
+
+    private float ComputePhysicalRippleSpacing(
+    float radius,
+    float lengthFactor,
+    float waterValue,
+    float windSpeed,
+    float crossWindAmount,
+    float currentBodyAw,
+    float tempCelsius
+)
     {
+        float windN = Mathf.Clamp01(windSpeed / 12f);
+        float coolingN = Mathf.Clamp01((-tempCelsius) / 20f);
+        float crossN = Mathf.Clamp01(crossWindAmount);
+        float awN = Mathf.Clamp01(Mathf.Abs(currentBodyAw));
+        float waterN = Mathf.Clamp01(waterValue);
 
-        float eb = Mathf.Clamp(
-            baseSpreadDistance,
-            avgEdgeLocal * 2f,
-            meshLocalSize * 0.10f
-            );
-        int nmb = baseMetaballCount;      // number of base metaballs (n_mb)
-        if (parentIcicle == null || eb <= 0f || nmb <= 0) return;
+        // 기본 간격: 고드름 반지름 기준
+        float baseSpacing = radius * 2.2f;
 
-        //물 계수 정규화 
+        // 바람, 냉각, 비대칭이 강할수록 리플 간격 감소
+        float instability =
+            1f +
+            windN * 0.65f +
+            coolingN * 0.35f +
+            crossN * 0.35f +
+            awN * 0.45f;
+
+        // 물이 많으면 리플 크기는 커지지만 간격은 약간 넓어지도록 완화
+        instability *= Mathf.Lerp(1.05f, 0.85f, waterN);
+
+        float spacing = baseSpacing / Mathf.Max(0.1f, instability);
+
+        // 뿌리와 끝부분에서는 리플이 너무 촘촘하지 않게 완화
+        float rootFade = Mathf.SmoothStep(0.08f, 0.22f, lengthFactor);
+        float tipFade = 1f - Mathf.SmoothStep(0.78f, 1f, lengthFactor);
+        float bodyFade = rootFade * tipFade;
+
+        float fadeMultiplier = Mathf.Lerp(1.8f, 1.0f, bodyFade);
+        spacing *= fadeMultiplier;
+
+        // 너무 작거나 커지는 것 방지
+        float minSpacingValue = Mathf.Max(avgEdgeWorld * 0.5f, radius * 0.8f);
+        float maxSpacingValue = Mathf.Max(avgEdgeWorld * 2.0f, radius * 3.5f);
+
+        return Mathf.Clamp(spacing, minSpacingValue, maxSpacingValue);
+    }
+
+    // 4.4.3 Base of Icicle 
+    private void BaseOfIcicles(GameObject parentIcicle, int mainDripPointIndex, float rootRadiusWorld)
+    {
+        if (parentIcicle == null) return;
+
+        int nmb = baseMetaballCount;
+        if (nmb <= 0) return;
+
+        // 월드 반지름을 로컬 기준으로 변환
+        float avgScale = Mathf.Max(
+            1e-6f,
+            (transform.lossyScale.x + transform.lossyScale.y + transform.lossyScale.z) / 3f
+        );
+
+        float rootRadiusLocal = rootRadiusWorld / avgScale;
+
+        float baseUnitWorld = Mathf.Clamp(
+             rootRadiusWorld,
+             meshWorldSize * 0.01f,  // 최소 크기 상향
+             meshWorldSize * 0.05f   // 최대 크기 상향 (기존 0.009f -> 0.05f)
+         );
+
+        float baseUnitLocal = baseUnitWorld / avgScale;
+
+        float eb = Mathf.Min(
+               baseSpreadDistance,
+               baseUnitLocal * 5.0f,  // 4.0f -> 5.0f로 넓게 퍼지도록
+               meshLocalSize * 0.1f   // 0.045f -> 0.1f로 제한 완화
+           );
+
+        eb = Mathf.Max(eb, avgEdgeLocal * 1.5f);
+
+        if (eb <= 0f) return;
+
+        // 물 계수 정규화 기준
         float denom = 1f;
         if (waterCoeff != null && waterCoeff.Length > 0)
         {
             float[] tmp = (float[])waterCoeff.Clone();
             System.Array.Sort(tmp);
-            int p = Mathf.Clamp(Mathf.FloorToInt(tmp.Length * 0.95f), 0, tmp.Length - 1);
+
+            int p = Mathf.Clamp(
+                Mathf.FloorToInt(tmp.Length * 0.95f),
+                0,
+                tmp.Length - 1
+            );
+
             denom = Mathf.Max(1e-6f, tmp[p]);
         }
 
+        int start = mainDripPointIndex;
 
-        Vector3 pLocal = vertices[mainDripPointIndex];
-        Vector3 nLocal = normals[mainDripPointIndex].normalized;
-        Vector3 centerWorld = transform.TransformPoint(pLocal + nLocal * 0.003f);
+        if (start < 0 || start >= vertices.Length) return;
 
-        // 범위 eb 안에서 포인트 뿌리기 
+        Vector3 rootNormal = SafeLocalNormal(vertices[start], normals[start]);
+
+        // 드립 포인트 주변 정점을 지오데식 방식으로 수집
         var nearby = new List<int>();
         var geod = new Dictionary<int, float>(256);
         var q = new Queue<int>(256);
-        int start = mainDripPointIndex;
 
+        nearby.Add(start);
         geod[start] = 0f;
         q.Enqueue(start);
 
@@ -1618,16 +1703,19 @@ public class Theory_Surface : MonoBehaviour
         {
             int v = q.Dequeue();
             float dv = geod[v];
+
             if (dv > eb) continue;
 
-            if (v != start)
+            if (v != start && !nearby.Contains(v))
                 nearby.Add(v);
 
             if (!vertexNeighbors.TryGetValue(v, out var nbs)) continue;
+
             foreach (int u in nbs)
             {
                 float w = Vector3.Distance(vertices[v], vertices[u]);
                 float nd = dv + w;
+
                 if (nd <= eb && (!geod.ContainsKey(u) || nd < geod[u]))
                 {
                     geod[u] = nd;
@@ -1636,46 +1724,60 @@ public class Theory_Surface : MonoBehaviour
             }
         }
 
-        if (nearby.Count == 0) nearby.Add(start);
-
-
         nearby.Sort((a, b) => geod[a].CompareTo(geod[b]));
+
         int take = Mathf.Min(nmb, nearby.Count);
 
         float wcDrip = Mathf.Clamp01(waterCoeff[start] / denom);
+        float waterScale = Mathf.Lerp(0.75f, 1.10f, wcDrip);
 
-        //드립포인트 주변으로 메타볼 생성
         for (int k = 0; k < take; k++)
         {
             int idx = nearby[k];
+
             Vector3 vLocal = vertices[idx];
             Vector3 vNorm = SafeLocalNormal(vLocal, normals[idx]);
 
-            float dLocal = geod.TryGetValue(idx, out var dd) ? dd : eb;
-            float numer = Mathf.Max(0f, eb - dLocal);
-            float falloff = (numer * numer) / (eb * eb);
-
-            float rb = falloff * wcDrip * meshLocalSize * 0.035f;
-
-            if (rb < surfaceEpsilonLocal)
+            if (Vector3.Dot(vNorm, rootNormal) < 0.75f)
                 continue;
 
-            // 메타볼 중심을 표면 밖으로 이동
-            float offset = Mathf.Max(rb * 0.6f, surfaceEpsilonLocal);
-            Vector3 worldPos = transform.TransformPoint(vLocal + vNorm * offset);
+            Vector3 rel = vLocal - vertices[start];
+            float normalOffset = Vector3.Dot(rel, rootNormal);
 
-            // Create metaball object
-            GameObject seg = new GameObject($"IcicleBase_{idx}");
-            seg.transform.SetParent(parentIcicle.transform, true);
-            seg.transform.position = worldPos;
-            seg.transform.rotation = Quaternion.identity;
-            seg.transform.localScale = Vector3.one;
+            if (Mathf.Abs(normalOffset) > avgEdgeLocal * 2.5f)
+                continue;
 
-            SphereCollider sc = seg.AddComponent<SphereCollider>();
-            sc.isTrigger = true;
-            sc.radius = rb;
+            float dLocal = geod.TryGetValue(idx, out var dd) ? dd : eb;
+            float t = Mathf.Clamp01((eb - dLocal) / Mathf.Max(eb, 1e-6f));
 
-            generatedIcicleSegments.Add(seg);
+            float falloff = Mathf.Pow(t, 1.6f);
+
+            float rb = baseUnitWorld * 1.5f * falloff * waterScale;
+
+            float minBaseRadius = baseUnitWorld * 0.2f;
+            float maxBaseRadius = baseUnitWorld * 2.5f;
+
+            if (rb < minBaseRadius)
+                continue;
+
+            rb = Mathf.Clamp(rb, minBaseRadius, maxBaseRadius);
+
+            Vector3 worldNormal = LocalNormalToWorld(vNorm);
+
+            float offset = Mathf.Max(rb * 0.06f, surfaceEpsilonWorld * 0.35f);
+            Vector3 worldPos = transform.TransformPoint(vLocal) + worldNormal * offset;
+
+            GameObject baseBall = new GameObject($"BaseMetaball_{generatedIcicleSegments.Count}");
+            baseBall.transform.SetParent(parentIcicle.transform, true);
+            baseBall.transform.position = worldPos;
+            baseBall.transform.rotation = Quaternion.identity;
+            baseBall.transform.localScale = Vector3.one;
+
+            SphereCollider baseCollider = baseBall.AddComponent<SphereCollider>();
+            baseCollider.isTrigger = true;
+            baseCollider.radius = rb;
+
+            generatedIcicleSegments.Add(baseBall);
         }
     }
 
@@ -1736,15 +1838,6 @@ public class Theory_Surface : MonoBehaviour
         }
 
         // 빙막 재질 적용
-        if (ice != null)
-        {
-            glazeRenderer.material = ice;
-        }
-        else
-        {
-            glazeRenderer.material = new Material(Shader.Find("Standard"));
-        }
-
         if (ice != null)
         {
             glazeRenderer.material = ice;
