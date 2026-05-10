@@ -53,7 +53,13 @@ public class Theory_Surface : MonoBehaviour
     public int numberOfIcicles = 15;
     public List<int> gizmoVertexIndices;
     public float gizmoSize = 0.3f;
+    [Header("Bottom Exclusion")]
+    [Tooltip("오브젝트 전체 높이 중 최하단 몇 %를 드립 포인트에서 제외할지")]
+    [Range(0f, 0.2f)]
+    public float bottomExclusionRatio = 0.06f;
 
+    [Tooltip("평균 엣지 길이 기준으로 최소 제외 두께")]
+    public float bottomExclusionEdgeMultiplier = 2.0f;
 
     [Header("Icicle Growth Parameters")]
     public float segmentLength = 2.0f;
@@ -478,11 +484,40 @@ public class Theory_Surface : MonoBehaviour
 
         return F_grav / Mathf.Max(1e-6f, F_adhesive);
     }
+    //추가 260509
+    private void GetHeightRangeAlongGravity(Vector3 gLocal, out float minH, out float maxH)
+    {
+        minH = float.PositiveInfinity;
+        maxH = float.NegativeInfinity;
 
-    private int FindPhysicalDripPoint(int startIdx, Vector3 gLocal)
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            float h = Vector3.Dot(vertices[i], -gLocal);
+
+            if (h < minH) minH = h;
+            if (h > maxH) maxH = h;
+        }
+    }
+
+    private float ComputeBottomLimitHeight(float minH, float maxH)
+    {
+        float heightRange = Mathf.Max(maxH - minH, 1e-6f);
+
+        float byRatio = heightRange * bottomExclusionRatio;
+        float byEdge = avgEdgeLocal * bottomExclusionEdgeMultiplier;
+
+        return minH + Mathf.Max(byRatio, byEdge);
+    }
+
+    private bool IsInBottomExclusionBand(int vertexIndex, Vector3 gLocal, float bottomLimitH)
+    {
+        float h = Vector3.Dot(vertices[vertexIndex], -gLocal);
+        return h <= bottomLimitH;
+    }
+
+    private int FindPhysicalDripPoint(int startIdx, Vector3 gLocal, float bottomLimitH)
     {
         int current = startIdx;
-        int prev = startIdx;
         int steps = 0;
 
         while (steps++ < 512)
@@ -498,7 +533,13 @@ public class Theory_Surface : MonoBehaviour
             foreach (int n in nbs)
             {
                 float hN = Vector3.Dot(vertices[n], -gLocal);
+
+                // 핵심: 완전 밑바닥 영역으로는 내려가지 않음
+                if (hN <= bottomLimitH)
+                    continue;
+
                 float dH = hCur - hN;
+
                 if (dH > maxDrop)
                 {
                     maxDrop = dH;
@@ -506,16 +547,21 @@ public class Theory_Surface : MonoBehaviour
                 }
             }
 
-            if (next == -1) break; // 국소 최저점 도달
+            // 더 내려갈 수 있는 이웃이 없으면,
+            // bottom 제외 영역 안에서의 국소 최저점에 도달한 것
+            if (next == -1)
+                break;
 
             float ratio = ComputeDripForceRatio(current, next, gLocal);
+
             if (ratio > dripForceRatioThreshold)
             {
-                return next; // 중력이 표면 장력을 이겼으므로 여기서 낙하 시작
+                return next;
             }
 
             current = next;
         }
+
         return current;
     }
 
@@ -528,15 +574,13 @@ public class Theory_Surface : MonoBehaviour
         Vector3 worldG = raycastSource ? raycastSource.TransformDirection(Vector3.down) : Vector3.down;
         Vector3 g = transform.InverseTransformDirection(worldG).normalized;
 
-        float minHeightAlongGravity = float.MaxValue;
-        for (int i = 0; i < vertices.Length; i++)
-        {
-            float h = Vector3.Dot(vertices[i], -g);  // 중력 반대 방향의 높이
-            if (h < minHeightAlongGravity) minHeightAlongGravity = h;
-        }
+        float minHeightAlongGravity;
+        float maxHeightAlongGravity;
+
+        GetHeightRangeAlongGravity(g, out minHeightAlongGravity, out maxHeightAlongGravity);
 
         float gravityBasedBottomThreshold =
-    minHeightAlongGravity + Mathf.Max(meshLocalSize * 0.01f, avgEdgeLocal * 0.5f);
+            ComputeBottomLimitHeight(minHeightAlongGravity, maxHeightAlongGravity);
 
         float waterThreshold = Mathf.Max(maxWaterAmount * 0.01f, 1e-6f);
 
@@ -555,7 +599,7 @@ public class Theory_Surface : MonoBehaviour
 
             // 2. 중력 방향 기준으로 너무 아래쪽인가?
             float heightAlongGravity = Vector3.Dot(vertices[i], -g);
-            if (heightAlongGravity < gravityBasedBottomThreshold)
+            if (heightAlongGravity <= gravityBasedBottomThreshold)
                 continue;
 
             // 3. 표면이 충분히 아래를 향하는가? (중력 방향과 일치)
@@ -590,7 +634,9 @@ public class Theory_Surface : MonoBehaviour
         for (int i = 0; i < seedVertices.Count && finalDripIndices.Count < numberOfIcicles; i++)
         {
             int seedIdx = seedVertices[i];
-            int dripIdx = FindPhysicalDripPoint(seedIdx, g);
+            int dripIdx = FindPhysicalDripPoint(seedIdx, g, gravityBasedBottomThreshold);
+            if (IsInBottomExclusionBand(dripIdx, g, gravityBasedBottomThreshold))
+                continue;
 
             // 이미 사용된 정점인가?
             if (usedIndices.Contains(dripIdx))
@@ -701,7 +747,6 @@ public class Theory_Surface : MonoBehaviour
         Transform meshTr = this.transform;
 
         int vIdx = gizmoVertexIndices[icicleIndex];
-
         Vector3 localNormal = SafeLocalNormal(vertices[vIdx], normals[vIdx]);
         Vector3 worldDripPoint = meshTr.TransformPoint(vertices[vIdx]);
         Vector3 worldNormal = LocalNormalToWorld(localNormal);
@@ -717,9 +762,21 @@ public class Theory_Surface : MonoBehaviour
         float rootRadius = IcicleProfile(0f, maxLength, windVector.magnitude);
         float rootClearance = Mathf.Max(surfaceEpsilonWorld, rootRadius * 0.75f);
 
+        // 실제 콜라이더 표면 기준으로 시작점 보정
+        RaycastHit rootHit;
+        float startCastDistance = Mathf.Max(
+            rootClearance * 3.0f,
+            avgEdgeWorld * 4.0f,
+            surfaceEpsilonWorld * 4.0f
+        );
+
+        if (TryGetSafeSurfaceStart(worldDripPoint, worldNormal, startCastDistance, out rootHit))
+        {
+            worldDripPoint = rootHit.point;
+            worldNormal = rootHit.normal.normalized;
+        }
+
         Vector3 currentWorldPos = worldDripPoint + worldNormal * rootClearance;
-
-
 
         // 1) LineRenderer 세팅 (회전은 따라가되, 스케일은 중화)
         GameObject trajectoryHelper = new GameObject($"IcicleLine_{icicleIndex}");
@@ -743,7 +800,7 @@ public class Theory_Surface : MonoBehaviour
         lr.startWidth = 0.02f * avgScale;
         lr.endWidth = 0.005f * avgScale;
         lr.material = lineMaterial;
-
+        lr.enabled = false; 
         // 로컬 좌표 리스트
         List<Vector3> localPoints = new List<Vector3>();
         Vector3 initialLocalPos = trajectoryHelper.transform.InverseTransformPoint(currentWorldPos);
@@ -912,6 +969,24 @@ public class Theory_Surface : MonoBehaviour
                 }
             }
 
+            // 최종 관통 방지: 현재 위치에서 다음 위치로 가는 선분이 원본 표면을 뚫는지 검사
+            RaycastHit blockHit;
+            if (surfaceCollider != null &&
+                Physics.Linecast(currentWorldPos, nextWorldPos, out blockHit, collisionLayers) &&
+                blockHit.collider == surfaceCollider)
+            {
+                float hitDist = Vector3.Distance(currentWorldPos, blockHit.point);
+
+                if (hitDist > surfaceEpsilonWorld * 0.5f)
+                {
+                    currentNormal = blockHit.normal.normalized;
+                    float safeLift = Mathf.Max(dynamicLift, surfaceEpsilonWorld * 2.0f);
+
+                    nextWorldPos = blockHit.point + currentNormal * safeLift;
+                    isOnSurface = true;
+                }
+            }
+
             accumulatedLength += Vector3.Distance(currentWorldPos, nextWorldPos);
 
             // 월드 -> 로컬로 변환해서 저장 (useWorldSpace=false 이므로)
@@ -1059,7 +1134,47 @@ public class Theory_Surface : MonoBehaviour
         }
     }
 
+    private bool TryGetSafeSurfaceStart(
+    Vector3 worldPoint,
+    Vector3 approxNormal,
+    float castDistance,
+    out RaycastHit bestHit
+)
+    {
+        bestHit = new RaycastHit();
 
+        if (surfaceCollider == null)
+            return false;
+
+        Vector3 n = approxNormal.sqrMagnitude > 1e-6f
+            ? approxNormal.normalized
+            : Vector3.up;
+
+        Vector3[] dirs =
+        {
+        n,
+        -n,
+        Vector3.up,
+        Vector3.down
+    };
+
+        for (int i = 0; i < dirs.Length; i++)
+        {
+            Vector3 dir = dirs[i];
+
+            Ray ray = new Ray(
+                worldPoint + dir * castDistance,
+                -dir
+            );
+
+            if (surfaceCollider.Raycast(ray, out bestHit, castDistance * 2.0f))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
     // Drip region 판정 함수 (클래스에 추가)
     private bool IsDripRegion(Vector3 worldPosition, Vector3 worldNormal)
     {
@@ -1259,7 +1374,6 @@ public class Theory_Surface : MonoBehaviour
             sc.radius = finalRadius;
             generatedIcicleSegments.Add(g);
 
-            // 뿌리 부분에도 약하게 리플이 생기도록 시작 구간을 앞당김
             float rippleStartByLength = 0.05f;
 
             // tipZone은 기존 CreateMetaballSegments 안에 있는 값 사용
@@ -1764,7 +1878,7 @@ public class Theory_Surface : MonoBehaviour
 
             Vector3 worldNormal = LocalNormalToWorld(vNorm);
 
-            float offset = Mathf.Max(rb * 0.06f, surfaceEpsilonWorld * 0.35f);
+            float offset = Mathf.Max(rb * 0.45f, surfaceEpsilonWorld * 1.5f);
             Vector3 worldPos = transform.TransformPoint(vLocal) + worldNormal * offset;
 
             GameObject baseBall = new GameObject($"BaseMetaball_{generatedIcicleSegments.Count}");
@@ -1823,8 +1937,6 @@ public class Theory_Surface : MonoBehaviour
             glazeMetaball = glazeIceContainer.AddComponent<OriginMCBlob>();
         }
 
-        // OriginMCBlob을 추가하는 과정에서 MeshFilter/MeshRenderer가 자동으로 붙을 수 있으므로
-        // AddComponent를 바로 하지 말고 GetComponent로 먼저 확인
         MeshFilter glazeFilter = glazeIceContainer.GetComponent<MeshFilter>();
         if (glazeFilter == null)
         {
