@@ -111,7 +111,8 @@ public class Theory_Surface : MonoBehaviour
 
     [Header("Wind Settings")]
     public Vector3 windVector = new Vector3(5f, 0f, 0f); // X, Z축으로 바람 세기 조절
-
+    [Header("Time Settings")]
+    public float time = 0.0f; 
     [Tooltip("고드름 성장 속도 (mm/s)")]
     public float v_speed_mm = 3.0f;
     private Vector3 lastWindVector;
@@ -148,6 +149,9 @@ public class Theory_Surface : MonoBehaviour
     [Range(0f, 1f)]
     public float rippleEmbedRatio = 0.40f;
 
+
+
+
     //모든 메시에 적용되도록
     private float meshLocalSize = 1f;
     private float meshWorldSize = 1f;
@@ -155,6 +159,8 @@ public class Theory_Surface : MonoBehaviour
     private float avgEdgeWorld = 0.01f;
     private float surfaceEpsilonLocal = 0.001f;
     private float surfaceEpsilonWorld = 0.001f;
+
+
 
 
     // Start is called before the first frame update
@@ -850,33 +856,78 @@ public class Theory_Surface : MonoBehaviour
             float gamma = IciclePhysics.ComputeGamma(Temperature, waterValue);
 
             float I_u = IciclePhysics.CalculateIU(currentWindSpeed);
-            float dAsym = IciclePhysics.ComputeAsymmetricGrowth(kappa, I_u, Aw, gamma) * simDt;
-            float tanBefore = current_tan_phi;
-            float dTheory = beta * (tan_theory - tanBefore) * simDt;
-            float tanAfter = tanBefore + dTheory + dAsym;
+            float stepLen = Mathf.Clamp(
+             segmentLength,
+             avgEdgeWorld * 0.75f,
+             meshWorldSize * 0.04f
+             );
 
-            tanAfter = Mathf.Clamp(tanAfter, 0f, Mathf.Tan(75f * Mathf.Deg2Rad));
-            current_tan_phi = tanAfter;
-            Debug.Log(
-                $"[Bend Check] wind={currentWindSpeed:F1}m/s, " +
-                $"tanTheory={tan_theory:F3}, " +
-                $"angleTheory={Mathf.Atan(tan_theory) * Mathf.Rad2Deg:F1}deg, " +
-                $"tanCurrent={current_tan_phi:F3}, " +
-                $"angleCurrent={Mathf.Atan(current_tan_phi) * Mathf.Rad2Deg:F1}deg, " +
-                $"Aw={Aw:F3}"
+            float dAsym = IciclePhysics.ComputeAsymmetricGrowth(kappa, I_u, Aw, gamma) * simDt;
+            
+            float tanBefore = current_tan_phi;
+            float maxTan = Mathf.Tan(75 * Mathf.Deg2Rad);
+            float asymTargetOffsetTan = 0f;
+            //float dTheory = beta * (tan_theory - tanBefore) * simDt;
+
+           
+            if (currentWindSpeed > 0.1f)
+            {
+                asymTargetOffsetTan = dAsym / Mathf.Max(beta * simDt, 1e-6f);
+                asymTargetOffsetTan = Mathf.Max(0f, asymTargetOffsetTan);
+                asymTargetOffsetTan = Mathf.Clamp(
+                    asymTargetOffsetTan,
+                    0f,
+                    Mathf.Max(0f, maxTan - tan_theory)
+                    ); 
+            }
+
+            float targetTan = tan_theory + asymTargetOffsetTan;
+            targetTan = Mathf.Clamp(targetTan, 0f, maxTan);
+
+            float growthStep01 = Mathf.Clamp01(
+                 stepLen / Mathf.Max(maxLength, 1e-6f)
+             );
+
+            // beta * simDt만 쓰면 너무 느리므로,
+            // 실제 성장 스텝 비율과 풍속 반응 강도를 이용해 보정
+            float bendResponse = Mathf.Clamp01(
+                Mathf.Max(beta * simDt, growthStep01 * I_u)
             );
-            if (tanAfter >= Mathf.Tan(75f * Mathf.Deg2Rad))
+
+            // 핵심: dBend 누적 방식이 아니라 targetTan으로 보간
+            float tanAfter = Mathf.Lerp(tanBefore, targetTan, bendResponse);
+
+            tanAfter = Mathf.Clamp(tanAfter, 0f, maxTan);
+            current_tan_phi = tanAfter;
+
+            // 로그용 dBend
+            float dBend = tanAfter - tanBefore;
+
+
+            Debug.Log(
+                  $"[Bend Check] wind={currentWindSpeed:F1}m/s, " +
+                  $"tanTheory={tan_theory:F3}, " +
+                  $"angleTheory={Mathf.Atan(tan_theory) * Mathf.Rad2Deg:F1}deg, " +
+                  $"dAsym={dAsym:F6}, " +
+                  $"asymOffsetTan={asymTargetOffsetTan:F3}, " +
+                  $"targetAngle={Mathf.Atan(targetTan) * Mathf.Rad2Deg:F1}deg, " +
+                  $"growthStep={growthStep01:F3}, " +
+                  $"bendResponse={bendResponse:F3}, " +
+                  $"tanCurrent={current_tan_phi:F3}, " +
+                  $"angleCurrent={Mathf.Atan(current_tan_phi) * Mathf.Rad2Deg:F1}deg, " +
+                  $"beta={beta:F5}, " +
+                  $"simDt={simDt:F3}, " +
+                  $"Aw={Aw:F3}, " +
+                  $"Iu={I_u:F3}"
+             );
+
+            if (tanAfter >= maxTan)
             {
                 Debug.LogWarning("[Clamp Warning] 각도가 75도 제한에 도달했습니다!");
             }
-
             // 다음 위치 기본값(월드)
             Vector3 stepDirection = (Vector3.down + windDirectionHorizontal * current_tan_phi).normalized;
-            float stepLen = Mathf.Clamp(
-                segmentLength,
-                avgEdgeWorld * 0.75f,
-                meshWorldSize * 0.04f
-                );
+         
             Vector3 nextWorldPos = currentWorldPos + stepDirection * stepLen;
 
             RaycastHit hit;
