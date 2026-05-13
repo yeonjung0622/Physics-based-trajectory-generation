@@ -857,8 +857,14 @@ public class Theory_Surface : MonoBehaviour
 
             tanAfter = Mathf.Clamp(tanAfter, 0f, Mathf.Tan(75f * Mathf.Deg2Rad));
             current_tan_phi = tanAfter;
-
-
+            Debug.Log(
+                $"[Bend Check] wind={currentWindSpeed:F1}m/s, " +
+                $"tanTheory={tan_theory:F3}, " +
+                $"angleTheory={Mathf.Atan(tan_theory) * Mathf.Rad2Deg:F1}deg, " +
+                $"tanCurrent={current_tan_phi:F3}, " +
+                $"angleCurrent={Mathf.Atan(current_tan_phi) * Mathf.Rad2Deg:F1}deg, " +
+                $"Aw={Aw:F3}"
+            );
             if (tanAfter >= Mathf.Tan(75f * Mathf.Deg2Rad))
             {
                 Debug.LogWarning("[Clamp Warning] 각도가 75도 제한에 도달했습니다!");
@@ -1518,9 +1524,8 @@ public class Theory_Surface : MonoBehaviour
                     return;
                 }
 
-                // 기존 rippleAmplitude를 기본 리플 크기 기준으로 사용
+             
                 float neutralRatio = Mathf.Clamp(rippleAmplitude * 0.5f, 0.03f, 0.08f);
-
 
                 float dynamicWindwardRatio = Mathf.Lerp(
                     neutralRatio,
@@ -1533,13 +1538,13 @@ public class Theory_Surface : MonoBehaviour
                     leewardRippleRatio,
                     asymEffect
                 );
-                // 기존 rippleFrequency를 이용해 단면 리플 개수 결정
+
+              
                 int baseRippleCount = Mathf.Clamp(
                     Mathf.RoundToInt(rippleFrequency * 0.3f),
                     4,
                     10
                 );
-
                 // 풍상
                 int windwardCount = Mathf.Max(
                     baseRippleCount + 1,
@@ -1551,7 +1556,6 @@ public class Theory_Surface : MonoBehaviour
                     3,
                     Mathf.RoundToInt(baseRippleCount * Mathf.Lerp(0.7f, 0.5f, asymEffect))
                 );
-
                 float windwardArcDeg = Mathf.Lerp(150f, 120f, asymEffect);
                 float leewardArcDeg = Mathf.Lerp(180f, 160f, asymEffect);
 
@@ -1717,10 +1721,8 @@ public class Theory_Surface : MonoBehaviour
         float awN = Mathf.Clamp01(Mathf.Abs(currentBodyAw));
         float waterN = Mathf.Clamp01(waterValue);
 
-        // 기본 간격: 고드름 반지름 기준
         float baseSpacing = radius * 2.2f;
 
-        // 바람, 냉각, 비대칭이 강할수록 리플 간격 감소
         float instability =
             1f +
             windN * 0.65f +
@@ -1728,12 +1730,10 @@ public class Theory_Surface : MonoBehaviour
             crossN * 0.35f +
             awN * 0.45f;
 
-        // 물이 많으면 리플 크기는 커지지만 간격은 약간 넓어지도록 완화
         instability *= Mathf.Lerp(1.05f, 0.85f, waterN);
 
         float spacing = baseSpacing / Mathf.Max(0.1f, instability);
 
-        // 뿌리와 끝부분에서는 리플이 너무 촘촘하지 않게 완화
         float rootFade = Mathf.SmoothStep(0.08f, 0.22f, lengthFactor);
         float tipFade = 1f - Mathf.SmoothStep(0.78f, 1f, lengthFactor);
         float bodyFade = rootFade * tipFade;
@@ -1741,7 +1741,6 @@ public class Theory_Surface : MonoBehaviour
         float fadeMultiplier = Mathf.Lerp(1.8f, 1.0f, bodyFade);
         spacing *= fadeMultiplier;
 
-        // 너무 작거나 커지는 것 방지
         float minSpacingValue = Mathf.Max(avgEdgeWorld * 0.5f, radius * 0.8f);
         float maxSpacingValue = Mathf.Max(avgEdgeWorld * 2.0f, radius * 3.5f);
 
