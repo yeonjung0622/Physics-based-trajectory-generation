@@ -111,8 +111,12 @@ public class Theory_Surface : MonoBehaviour
 
     [Header("Wind Settings")]
     public Vector3 windVector = new Vector3(5f, 0f, 0f); // X, Z축으로 바람 세기 조절
-    [Header("Time Settings")]
-    public float time = 0.0f; 
+    [Header("Wind Timing Settings")]
+    
+    [Tooltip("바람이 적용되기 시작하는 고드름 성장 진행률")]
+    [Range(0f, 1f)]
+    public float windStartGrowthRatio = 0.3f;
+   
     [Tooltip("고드름 성장 속도 (mm/s)")]
     public float v_speed_mm = 3.0f;
     private Vector3 lastWindVector;
@@ -711,6 +715,24 @@ public class Theory_Surface : MonoBehaviour
 
     }
 
+    private float ComputeWindRamp01(float growthTime01)
+    {
+        float rampDuration01 = 0.08f; // 바람이 서서히 켜지는 구간
+
+        if (growthTime01 < windStartGrowthRatio)
+            return 0f;
+
+        float rampEnd = Mathf.Clamp01(windStartGrowthRatio + rampDuration01);
+
+        if (rampEnd <= windStartGrowthRatio + 1e-6f)
+            return 1f;
+
+        float ramp = Mathf.InverseLerp(windStartGrowthRatio, rampEnd, growthTime01);
+        ramp = Mathf.Clamp01(ramp);
+
+        return Mathf.SmoothStep(0f, 1f, ramp);
+    }
+
     private IEnumerator GenerateIcicles()
     {
         // 고드름 초기화 
@@ -835,11 +857,19 @@ public class Theory_Surface : MonoBehaviour
         {
             // 회전 중에도 정확히 붙기: 마지막 로컬 점의 "현재 월드" 위치 재계산
             currentWorldPos = trajectoryHelper.transform.TransformPoint(localPoints[localPoints.Count - 1]);
+            
+            float growthTime01 = Mathf.Clamp01(
+                accumulatedLength / Mathf.Max(maxLength, 1e-6f)
+            );
 
-            // 바람(월드 고정, 수평 성분만)
-            Vector3 windH = new Vector3(windVector.x, 0f, windVector.z);
+            float windRamp = ComputeWindRamp01( growthTime01 ); 
+            Vector3 targetWindH = new Vector3(windVector.x, 0f, windVector.z);
+
+            Vector3 windH = targetWindH * windRamp;
             float currentWindSpeed = windH.magnitude;
-            Vector3 windDirectionHorizontal = (windH.sqrMagnitude > 1e-6f) ? windH.normalized : Vector3.zero;
+
+            Vector3 windDirectionHorizontal =
+                    (windH.sqrMagnitude > 1e-6f) ? windH.normalized : Vector3.zero;
 
             //이론 성장항
             float rMeters = dropletRadiusMm / 1000f;
@@ -866,10 +896,9 @@ public class Theory_Surface : MonoBehaviour
             
             float tanBefore = current_tan_phi;
             float maxTan = Mathf.Tan(75 * Mathf.Deg2Rad);
-            float asymTargetOffsetTan = 0f;
-            //float dTheory = beta * (tan_theory - tanBefore) * simDt;
 
-           
+            float asymTargetOffsetTan = 0f;
+      
             if (currentWindSpeed > 0.1f)
             {
                 asymTargetOffsetTan = dAsym / Mathf.Max(beta * simDt, 1e-6f);
@@ -903,22 +932,23 @@ public class Theory_Surface : MonoBehaviour
             // 로그용 dBend
             float dBend = tanAfter - tanBefore;
 
-
             Debug.Log(
-                  $"[Bend Check] wind={currentWindSpeed:F1}m/s, " +
-                  $"tanTheory={tan_theory:F3}, " +
-                  $"angleTheory={Mathf.Atan(tan_theory) * Mathf.Rad2Deg:F1}deg, " +
-                  $"dAsym={dAsym:F6}, " +
-                  $"asymOffsetTan={asymTargetOffsetTan:F3}, " +
-                  $"targetAngle={Mathf.Atan(targetTan) * Mathf.Rad2Deg:F1}deg, " +
-                  $"growthStep={growthStep01:F3}, " +
-                  $"bendResponse={bendResponse:F3}, " +
-                  $"tanCurrent={current_tan_phi:F3}, " +
-                  $"angleCurrent={Mathf.Atan(current_tan_phi) * Mathf.Rad2Deg:F1}deg, " +
-                  $"beta={beta:F5}, " +
-                  $"simDt={simDt:F3}, " +
-                  $"Aw={Aw:F3}, " +
-                  $"Iu={I_u:F3}"
+                $"[Bend Check] time={growthTime01:F2}, " +
+                $"windRamp={windRamp:F2}, " +
+                $"wind={currentWindSpeed:F1}m/s, " +
+                $"tanTheory={tan_theory:F3}, " +
+                $"angleTheory={Mathf.Atan(tan_theory) * Mathf.Rad2Deg:F1}deg, " +
+                $"dAsym={dAsym:F6}, " +
+                $"asymOffsetTan={asymTargetOffsetTan:F3}, " +
+                $"targetAngle={Mathf.Atan(targetTan) * Mathf.Rad2Deg:F1}deg, " +
+                $"growthStep={growthStep01:F3}, " +
+                $"bendResponse={bendResponse:F3}, " +
+                $"tanCurrent={current_tan_phi:F3}, " +
+                $"angleCurrent={Mathf.Atan(current_tan_phi) * Mathf.Rad2Deg:F1}deg, " +
+                $"beta={beta:F5}, " +
+                $"simDt={simDt:F3}, " +
+                $"Aw={Aw:F3}, " +
+                $"Iu={I_u:F3}"
              );
 
             if (tanAfter >= maxTan)
@@ -931,8 +961,7 @@ public class Theory_Surface : MonoBehaviour
             Vector3 nextWorldPos = currentWorldPos + stepDirection * stepLen;
 
             RaycastHit hit;
-            float windSpeed = windVector.magnitude;
-            float currentRadius = IcicleProfile(accumulatedLength, maxLength, windSpeed);
+            float currentRadius = IcicleProfile(accumulatedLength, maxLength, currentWindSpeed);
             float dynamicLift = Mathf.Max(lift, currentRadius * 0.8f);
             //표면 충돌 및 슬라이딩
             // A) 공중 상태: 표면 찾기
@@ -1059,8 +1088,10 @@ public class Theory_Surface : MonoBehaviour
 
         if (localPoints.Count > 1)
         {
-            Vector3 finalWindH = new Vector3(windVector.x, 0, windVector.z);
-            Vector3 finalWindDir = (finalWindH.sqrMagnitude > 1e-6f) ? finalWindH.normalized : Vector3.zero;
+            float finalWindRamp = ComputeWindRamp01(1f);
+            Vector3 finalWindH = new Vector3(windVector.x, 0f, windVector.z) * finalWindRamp;
+            Vector3 finalWindDir =
+                (finalWindH.sqrMagnitude > 1e-6f) ? finalWindH.normalized : Vector3.zero;
 
             float windSpeed = finalWindH.magnitude;
 
@@ -1676,14 +1707,14 @@ public class Theory_Surface : MonoBehaviour
 
                         // 풍상은 더 강조, 풍하는 더 완만하게
                         float sideScale = isWindward
-                            ? Mathf.Lerp(1.05f, 1.25f, asymEffect)
+                            ? Mathf.Lerp(0.88f, 0.72f, asymEffect)
                             : Mathf.Lerp(0.95f, 0.85f, asymEffect);
 
                         rippleRadius *= sideScale;
 
                         // 방향별 최대/최소 크기 제한
                         float minRatio = isWindward ? 0.08f : 0.04f;
-                        float maxRatio = isWindward ? 0.42f : 0.24f;
+                        float maxRatio = isWindward ? 0.35f : 0.24f;
 
                         rippleRadius = Mathf.Clamp(
                             rippleRadius,
@@ -1702,12 +1733,12 @@ public class Theory_Surface : MonoBehaviour
                             bodyFade;
 
                         Vector3 shiftDir = isWindward ? -windCrossNorm : windCrossNorm;
-                        float shiftScale = isWindward ? 0.60f : 0.15f;
+                        float shiftScale = isWindward ? 0.2f : 0.15f;
 
                         Vector3 biasedCenter = bridgeCenter + shiftDir * centerShiftAmount * shiftScale;
 
                         float protrudeScale = isWindward
-                            ? Mathf.Lerp(0.55f, 0.85f, amplitudeScale)
+                            ? Mathf.Lerp(0.4f, 0.65f, amplitudeScale)
                             : Mathf.Lerp(0.25f, 0.45f, amplitudeScale);
 
                         float protrude = rippleRadius * (1f - rippleEmbedRatio) * protrudeScale;
